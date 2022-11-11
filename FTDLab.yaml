@@ -1,0 +1,458 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Deploy FTD lab managed via either FDM or FMC in AWS.
+Metadata:
+  'AWS::CloudFormation::Interface':
+    ParameterGroups:
+      - Label:
+          default: Lab Configuration
+        Parameters:
+          - KeyName
+          - ManageMethod
+Parameters:
+  KeyName:
+    Description: The EC2 Key Pair to allow SSH access to FTD , FMC and Server
+    Type: 'AWS::EC2::KeyPair::KeyName' 
+  ManageMethod:
+    Description: Manage the FTD either using FMC or via FDM(local)
+    Type: 'String'
+    Default: 'FDM'
+    AllowedValues: 
+    - FDM
+    - FMC
+Conditions:
+  DeployFDM:
+    Fn::Equals:
+    - Ref: ManageMethod
+    - 'FDM'
+  DeployFMC:
+    Fn::Equals:
+    - Ref: ManageMethod
+    - 'FMC'
+Resources:
+  vpc:
+    Type: 'AWS::EC2::VPC'
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      InstanceTenancy: default
+      EnableDnsSupport: 'true'
+      EnableDnsHostnames: 'true'
+      Tags:
+        - Key: Name
+          Value: !Join 
+            - ''
+            - - !Ref 'AWS::StackName'
+              - '-vpc'
+  subnetInside:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: us-east-1a 
+      VpcId: !Ref vpc
+      Tags:
+        - Key: Name
+          Value: !Join 
+            - ''
+            - - !Ref 'AWS::StackName'
+              - '-subnet-inside'
+  subnetOutside:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: us-east-1a
+      VpcId: !Ref vpc
+      Tags:
+        - Key: Name
+          Value: !Join 
+            - ''
+            - - !Ref 'AWS::StackName'
+              - '-subnet-outside'
+  subnetMgmt:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      CidrBlock:  10.0.0.0/24
+      AvailabilityZone: us-east-1a 
+      VpcId: !Ref vpc
+      Tags:
+        - Key: Name
+          Value: !Join 
+            - ''
+            - - !Ref 'AWS::StackName'
+              - '-subnet-mgmt'
+  igw:
+    Type: 'AWS::EC2::InternetGateway'
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Join 
+            - ''
+            - - !Ref 'AWS::StackName'
+              - '-igw'
+  gw1:
+    Type: 'AWS::EC2::VPCGatewayAttachment'
+    Properties:
+      VpcId: !Ref vpc
+      InternetGatewayId: !Ref igw
+  dopt:
+    Type: 'AWS::EC2::DHCPOptions'
+    Properties:
+      DomainName: !Join 
+        - ''
+        - - !Ref 'AWS::Region'
+          - .compute.internal
+      DomainNameServers:
+        - AmazonProvidedDNS
+  rtb:
+    Type: 'AWS::EC2::RouteTable'
+    Properties:
+      VpcId: !Ref vpc
+  rtbInside:
+    Type: 'AWS::EC2::RouteTable'
+    Properties:
+      VpcId: !Ref vpc
+  subnetrouteInside:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      RouteTableId: !Ref rtbInside
+      SubnetId: !Ref subnetInside
+  subnetrouteOutside:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      RouteTableId: !Ref rtb
+      SubnetId: !Ref subnetOutside
+  subnetrouteMgmt:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      RouteTableId: !Ref rtb
+      SubnetId: !Ref subnetMgmt
+  defaultRoute:
+    Type: 'AWS::EC2::Route'
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      RouteTableId: !Ref rtb
+      GatewayId: !Ref igw
+    DependsOn: gw1
+  defaultRouteInside:
+    Type: 'AWS::EC2::Route'
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      RouteTableId: !Ref rtbInside
+      NetworkInterfaceId: !Ref eniFTDInside
+  dchpassoc1:
+    Type: 'AWS::EC2::VPCDHCPOptionsAssociation'
+    Properties:
+      VpcId: !Ref vpc
+      DhcpOptionsId: !Ref dopt
+  SecurityGroupAll:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: Allow all traffic on vpc
+      VpcId: !Ref vpc
+      SecurityGroupIngress:
+        - IpProtocol: '-1'
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Join 
+            - ''
+            - - !Ref 'AWS::StackName'
+              - '-allow-all-vpc'
+  sgManagementInterface:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: Allow only traffic from MgmtExternalAccessCidr IP Ranges
+      VpcId: !Ref vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '22'
+          ToPort: '22'
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: '443'
+          ToPort: '443'
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: '80'
+          ToPort: '80'
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: '8305'
+          ToPort: '8305'
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: icmp
+          FromPort: '-1'
+          ToPort: '-1'
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Join 
+            - ''
+            - - !Ref 'AWS::StackName'
+              - '-allow-SSH-vpc'
+  eipFTDMgmt:
+    Type: 'AWS::EC2::EIP'
+    Properties:
+      Domain: !Ref vpc
+  eipFMCMgmt:
+    Condition : 'DeployFMC'
+    Type: 'AWS::EC2::EIP'
+    Properties:
+      Domain: !Ref vpc
+  eipFTDOutside:
+    Type: 'AWS::EC2::EIP'
+    Properties:
+      Domain: !Ref vpc
+  eipaFTDMgmt:
+    Type: 'AWS::EC2::EIPAssociation'
+    Properties:
+      AllocationId: !GetAtt 
+        - eipFTDMgmt
+        - AllocationId
+      NetworkInterfaceId: !Ref eniFTDMgmt
+  eipaFMCMgmt:
+    Condition : 'DeployFMC'
+    Type: 'AWS::EC2::EIPAssociation'
+    Properties:
+      AllocationId: !GetAtt 
+        - eipFMCMgmt
+        - AllocationId
+      NetworkInterfaceId: !Ref eniFMCMgmt
+  eipaFTDOutside:
+    Type: 'AWS::EC2::EIPAssociation'
+    Properties:
+      AllocationId: !GetAtt 
+        - eipFTDOutside
+        - AllocationId
+      NetworkInterfaceId: !Ref eniFTDOutside
+  eniFTDMgmt:
+    Type: 'AWS::EC2::NetworkInterface'
+    Properties:
+      SubnetId: !Ref subnetMgmt
+      Tags:
+        - Key: Name
+          Value: FTD-Mgmt-01
+      PrivateIpAddress: 10.0.0.41
+      Description: Interface for management traffic of FTD
+      GroupSet:
+        - !Ref sgManagementInterface
+      SourceDestCheck: 'false'
+  eniFMCMgmt:
+    Condition : 'DeployFMC'
+    Type: 'AWS::EC2::NetworkInterface'
+    Properties:
+      SubnetId: !Ref subnetMgmt
+      Tags:
+        - Key: Name
+          Value: FMC-Mgmt-01
+      PrivateIpAddress: 10.0.0.11
+      Description: Interface for FMC management
+      GroupSet:
+        - !Ref sgManagementInterface
+      SourceDestCheck: 'false'
+  eniWebServer:
+    Type: 'AWS::EC2::NetworkInterface'
+    Properties:
+      SubnetId: !Ref subnetInside
+      Tags:
+        - Key: Name
+          Value: WebServer-Eth0
+      PrivateIpAddress: 10.0.1.45
+      Description: Interface for Web Server
+      GroupSet:
+        - !Ref SecurityGroupAll
+      SourceDestCheck: 'false'
+  eniFTDdiag:
+    Type: 'AWS::EC2::NetworkInterface'
+    Properties:
+      SubnetId: !Ref subnetMgmt
+      Tags:
+        - Key: Name
+          Value: FTD-Diag-01
+      Description: Interface for diag traffic of FTD
+      GroupSet:
+        - !Ref sgManagementInterface
+      SourceDestCheck: 'false'
+  eniFTDInside:
+    Type: 'AWS::EC2::NetworkInterface'
+    Properties:
+      SubnetId: !Ref subnetInside
+      Tags:
+        - Key: Name
+          Value: FTD-Inside-01
+      PrivateIpAddress: 10.0.1.11
+      Description: Inside Interface of FTD
+      GroupSet:
+        - !Ref SecurityGroupAll
+      SourceDestCheck: 'false'
+  eniFTDOutside:
+    Type: 'AWS::EC2::NetworkInterface'
+    Properties:
+      SubnetId: !Ref subnetOutside
+      Tags:
+        - Key: Name
+          Value: FTD-Outside-01
+      PrivateIpAddress: 10.0.2.11
+      Description: Outside Interface of FTD
+      GroupSet:
+        - !Ref SecurityGroupAll
+      SourceDestCheck: 'false'
+  CiscoFTD:
+    Condition : 'DeployFMC'
+    Type: 'AWS::EC2::Instance'
+    Properties:
+      DisableApiTermination: 'false'
+      InstanceInitiatedShutdownBehavior: stop
+      ImageId: 'ami-08ea05c69d041dd13'
+      InstanceType: 'c5.xlarge'
+      KeyName: !Ref KeyName
+      Monitoring: 'false'
+      Tags:
+        - Key: Name
+          Value: !Join 
+            - ''
+            - - !Ref 'AWS::StackName'
+              - '-FTDv'
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            DeleteOnTermination: true
+      NetworkInterfaces:
+        - Description: Management interface
+          DeviceIndex: 0
+          NetworkInterfaceId: !Ref eniFTDMgmt
+        - Description: Diag interface
+          DeviceIndex: 1
+          NetworkInterfaceId: !Ref eniFTDdiag
+        - Description: Outside network interface
+          DeviceIndex: 2
+          NetworkInterfaceId: !Ref eniFTDOutside
+        - Description: Inside network interface
+          DeviceIndex: 3
+          NetworkInterfaceId: !Ref eniFTDInside
+      UserData: !Base64 
+        'Fn::Join':
+          - ''
+          - - '{"AdminPassword":"Cisco@123","Hostname":"FTD-01","ManageLocally": "No","FmcIp":"10.0.0.11","FmcRegKey":"EagleRay"}'
+  CiscoFDM:
+    Condition : 'DeployFDM'
+    Type: 'AWS::EC2::Instance'
+    Properties:
+      DisableApiTermination: 'false'
+      InstanceInitiatedShutdownBehavior: stop
+      ImageId: 'ami-08ea05c69d041dd13'
+      InstanceType: 'c5.xlarge'
+      KeyName: !Ref KeyName
+      Monitoring: 'false'
+      Tags:
+        - Key: Name
+          Value: !Join 
+            - ''
+            - - !Ref 'AWS::StackName'
+              - '-FTDv'
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            DeleteOnTermination: true
+      NetworkInterfaces:
+        - Description: Management interface
+          DeviceIndex: 0
+          NetworkInterfaceId: !Ref eniFTDMgmt
+        - Description: Diag interface
+          DeviceIndex: 1
+          NetworkInterfaceId: !Ref eniFTDdiag
+        - Description: Outside network interface
+          DeviceIndex: 2
+          NetworkInterfaceId: !Ref eniFTDOutside
+        - Description: Inside network interface
+          DeviceIndex: 3
+          NetworkInterfaceId: !Ref eniFTDInside
+      UserData: !Base64 
+        'Fn::Join':
+          - ''
+          - - '{"AdminPassword":"Cisco@123","Hostname":"FTD-01","ManageLocally": "Yes"}'
+  CiscoFMC:
+    Condition : 'DeployFMC'
+    Type: 'AWS::EC2::Instance'
+    Properties:
+      DisableApiTermination: 'false'
+      InstanceInitiatedShutdownBehavior: stop
+      ImageId: 'ami-03178186bec3df684'
+      InstanceType: 'c5.4xlarge'
+      KeyName: !Ref KeyName
+      Monitoring: 'false'
+      Tags:
+        - Key: Name
+          Value: !Join 
+            - ''
+            - - !Ref 'AWS::StackName'
+              - '-FMCv'
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            DeleteOnTermination: true
+      NetworkInterfaces:
+        - Description: Management interface
+          DeviceIndex: 0
+          NetworkInterfaceId: !Ref eniFMCMgmt
+      UserData: !Base64 
+        'Fn::Join':
+          - ''
+          - - '{"AdminPassword":"Cisco@123","Hostname":"FMC"}'
+  WebServer:
+    Type: 'AWS::EC2::Instance'
+    Properties: 
+      ImageId: ami-09d3b3274b6c5d4aa
+      InstanceType: t2.micro
+      KeyName: !Ref KeyName
+      Tags:
+        - Key: Name
+          Value: !Join 
+            - ''
+            - - !Ref 'AWS::StackName'
+              - '-WebServer'
+      NetworkInterfaces:
+        - Description: eth0 interface
+          DeviceIndex: 0
+          NetworkInterfaceId: !Ref eniWebServer
+      UserData:
+        Fn::Base64: 
+          !Sub |
+            #!/bin/bash
+            until curl -s -f -o /dev/null http://checkip.amazonaws.com; do sleep 5; done
+            yum update -y
+            amazon-linux-extras install -y php7.2
+            yum install -y httpd.x86_64
+            systemctl start httpd.service
+            systemctl enable httpd.service
+            echo "<?php phpinfo(); ?>" > /var/www/html/index.php
+Outputs:
+  FTDVersion:
+    Description: Version of FTDv Instance created
+    Value: 7.0.2-88
+  FMCVersion:
+    Description: Version of FMCv Instance created
+    Condition : 'DeployFMC'
+    Value: 7.0.2-88
+  FTDLicType:
+    Description: License Type of FTDv Instance created
+    Value: BYOL
+  FMCLicType:
+    Description: License Type of FMCv Instance created
+    Condition : 'DeployFMC'
+    Value: BYOL
+  FTDInstanceType:
+    Description: Type of FTDv Instance created
+    Value: c5.xlarge
+  FMCInstanceType:
+    Description: Type of FMCv Instance created
+    Condition : 'DeployFMC'
+    Value: c5.4xlarge
+  FTDAddress:
+    Description: The external management address of FTDv instance
+    Value: !Ref eipFTDMgmt
+  FTDOutsideAddress:
+    Description: The Public IP used for Natting on the FTDv instance
+    Value: !Ref eipFTDOutside
+  FMCAddress:
+    Description: The external management address of FMCv instance
+    Condition : 'DeployFMC'
+    Value: !Ref eipFMCMgmt
